@@ -1,0 +1,27 @@
+[Unit]
+Description=CI/CD learning HTTP service
+After=network.target
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+DynamicUser=yes
+WorkingDirectory=/opt/cicd-lab/current
+ExecStart=/usr/bin/python3 -B /opt/cicd-lab/current/server.py
+Environment=CICD_LAB_HOST=127.0.0.1
+Environment=CICD_LAB_PORT=18081
+Restart=on-failure
+RestartSec=5
+MemoryMax=64M
+MemorySwapMax=0
+CPUQuota=10%
+TasksMax=16
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
