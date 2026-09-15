@@ -48,7 +48,7 @@ class ServerTests(unittest.TestCase):
         for path in ("/missing", "/server.py", "/../VERSION", "/.git/config"):
             with self.subTest(path=path):
                 status, _, body = self.request(path)
-                self.assertEqual(status, 200)
+                self.assertEqual(status, 404)
                 self.assertEqual(json.loads(body), {"error": "not_found"})
 
     def test_head_has_no_body(self):
