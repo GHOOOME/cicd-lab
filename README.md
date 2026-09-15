@@ -1,71 +1,98 @@
-# CI/CD Lab
+# CI/CD Lab · Frontend
 
-用于学习 CI 和 AWS 部署的最小 HTTP API。只依赖 Python 3 标准库，没有数据库或第三方包。
+React + TypeScript + Vite + Tailwind CSS + shadcn/ui 的前端版本展示页。
 
-## 本地运行与测试
+## 本地开发
+
+推荐 Node.js 22。
 
 ```bash
-python3 -m unittest discover -s tests -v
-python3 server.py
+npm ci
+npm run dev
+npm test
+npm run build
 ```
 
-默认监听 `127.0.0.1:18081`。`/` 返回服务信息，`/health` 返回健康状态，`/version` 返回 `VERSION` 文件中的发布版本。未知路径返回 404，不提供目录或源码下载。
+开发地址 http://127.0.0.1:5173 。构建先检查 TypeScript，再生成 dist/，服务器只托管静态文件，不安装 node_modules 或执行构建。
 
-## 本次 AWS 部署
+## 版本号
 
-- 主机：`ubuntu@44.204.190.212`，AWS EC2 `t3.small`。
-- 发布目录：`/opt/cicd-lab/releases/0.1.0`。
-- 当前版本：`/opt/cicd-lab/current` 符号链接。
-- 服务：`cicd-lab.service`，由 systemd 管理并在开机时启动。
-- 监听地址：服务器的 `127.0.0.1:18081`，通过 SSH 隧道访问。
-- 资源限制：64 MB 内存、禁止使用 swap、最多占用单个 CPU 核心的 10%。
+只改根目录 VERSION：1.0 → 1.1 → 1.2。版本按字符串处理，1.9 后可以写 1.10。package.json 的 version 不控制页面版本。
 
-这个示例使用 Python 标准库 HTTP 服务器，仅用于学习实验。内存和 CPU 限制作用于示例服务，不保证整台共享主机的业务资源隔离。
+在功能分支修改、提交、推送，再创建目标为 main 的 PR。目前只配置 CI，推送不会自动部署服务器。
 
-## 从 Mac 访问
+## 两个学习环境
 
-在需要新建隧道时执行下面的命令，并保持该终端打开。已有隧道时无需重复执行。
+| 环境 | AWS 监听地址 | Mac 访问地址 | 容器 |
+|---|---|---|---|
+| 测试 | 127.0.0.1:18082 | http://127.0.0.1:18082 | cicd-web-staging |
+| 生产 | 127.0.0.1:18083 | http://127.0.0.1:18083 | cicd-web-production |
+
+主机 ubuntu@44.204.190.212，两份实例共用同一台 EC2，所以生产只是学习用的生产环境。每份 Nginx 实例内存限制 32 MB，CPU 限制为单核 10%。只绑定回环地址，通过 SSH 转发访问。
+
+本次已经建立后台 SSH 隧道，断开后可在 Mac 重新执行并保持终端打开：
 
 ```bash
 ssh -i ~/Documents/wf-2.pem -N \
   -o ExitOnForwardFailure=yes \
-  -L 127.0.0.1:18081:127.0.0.1:18081 ubuntu@44.204.190.212
+  -L 127.0.0.1:18082:127.0.0.1:18082 \
+  -L 127.0.0.1:18083:127.0.0.1:18083 \
+  ubuntu@44.204.190.212
 ```
 
-随后访问 `http://127.0.0.1:18081/health`。地址虽然是本地地址，但请求经 SSH 转发到 AWS。直接访问服务器公网 IP 的 18081 端口不会连接到这个服务。
-
-本次已经建立了后台 SSH 隧道。只关闭本次隧道而保留远端服务，可以在 Mac 上执行：
+关闭本次后台隧道：
 
 ```bash
-ssh -S /tmp/cicd-lab.BdrhFB/ssh-control -O exit ubuntu@44.204.190.212
+ssh -S /tmp/cicd-web.oTJaJs/ssh-control -O exit ubuntu@44.204.190.212
 ```
 
-隧道断开或 Mac 重启后，可以使用上面的前台转发命令重新连接。服务器上的 systemd 服务独立运行，不依赖 Mac 保持连接。
+旧 Python 服务停止并取消开机启动，旧服务器发布文件仍在 /opt/cicd-lab，源码历史仍可在 Git 中查看。
 
-## 管理服务
+## 发布数据
 
-先通过 SSH 登录服务器：
+- /opt/cicd-web/releases/<buildId>：构建产物。
+- /opt/cicd-web/environments/staging/current 和 production/current：分别指向两个环境的当前版本。
+- dist/release.json：构建时记录的版本、提交、构建时间和 buildId。
+- /environment.json：服务器提供的环境名和部署时间，独立于构建产物。
+
+两个环境可部署同一份产物，不重复构建。入口 HTML、环境信息和发布记录不缓存，带哈希的资源长期缓存。
+
+本次手动初始化包含未提交修改，提交标识带 -dirty，页面会显示“本地修改”，不冒充已提交版本。
+
+## 当前 CI
+
+.github/workflows/ci.yml：检出代码 → Node.js 22 → npm ci → npm test → npm run build。
+
+当前在 feat/frontend-environments 分支，尚未代为推送或合并。推送该分支并创建 PR 才会触发这份配置的 PR 检查。
+
+## 后续由你学习的 CD
+
+合并 main → CI → 自动部署测试 → 人工确认 → 将同一份产物部署生产。
+
+准确称呼是“测试环境自动部署 + 生产环境持续交付”。持续部署严格意义上指自动部署到生产环境。
+
+ops/ 是手动部署工具，目前没有接到 GitHub Actions，也没有配置部署密钥或权限。
+
+以下在服务器执行，BUILD_ID 要与 dist/release.json 一致：
 
 ```bash
-ssh -i ~/Documents/wf-2.pem ubuntu@44.204.190.212
+sudo bash /opt/cicd-web/ops/deploy-static.sh /path/to/dist BUILD_ID staging
+sudo bash /opt/cicd-web/ops/verify-static.sh staging BUILD_ID
+# 确认测试环境后，把同一份产物部署生产：
+sudo bash /opt/cicd-web/ops/deploy-static.sh /path/to/dist BUILD_ID production
+# 恢复一个仍保留的历史版本：
+sudo bash /opt/cicd-web/ops/rollback-static.sh staging PREVIOUS_BUILD_ID
 ```
 
-在服务器上执行：
+## 查看或停止实验
+
+通过 SSH 登录后执行：
 
 ```bash
-sudo systemctl status cicd-lab --no-pager
-sudo journalctl -u cicd-lab -n 30 --no-pager
-curl -fsS http://127.0.0.1:18081/health
+sudo docker logs --tail 30 cicd-web-staging
+sudo docker logs --tail 30 cicd-web-production
+sudo docker update --restart=no cicd-web-staging cicd-web-production
+sudo docker stop cicd-web-staging cicd-web-production
 ```
 
-结束实验时，下面的命令只停止示例服务并取消其开机启动，保留文件：
-
-```bash
-sudo systemctl disable --now cicd-lab
-```
-
-## 下一步：GitHub Actions
-
-`.github/workflows/ci.yml` 已准备好：检出代码、设置 Python、执行接口测试。目前没有创建或推送 GitHub 仓库，也没有执行过远程 Actions 工作流；此次部署属于手动部署。
-
-将此项目单独放入自己的 GitHub 仓库后，可以练习 PR 自动测试、故意让测试失败再修复。随后再设计自动部署、版本更新和回滚。SSH 私钥不属于项目文件，不能上传到仓库。
+无需修改其他容器。不要把 SSH 私钥提交到仓库。
