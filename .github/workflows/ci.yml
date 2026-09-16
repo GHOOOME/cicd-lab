@@ -17,14 +17,34 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
+
       - name: Set up Node.js
         uses: actions/setup-node@v7
+
         with:
           node-version: '22'
           cache: npm
+
       - name: Install dependencies
         run: npm ci
+
       - name: Run frontend tests
         run: npm test
+
       - name: Check types and build frontend
         run: npm run build
+
+      - name: Upload frontend artifact
+        # 只有代码推送到 `main` 分支时，步骤才会执行
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        # GitHub 官方 Action，用于保存 Job 生成的文件
+        uses: actions/upload-artifact@v7
+        with:
+          # Artifact 的名称  github.sha: 当前提交的完整提交 SHA
+          name: frontend-dist-${{ github.sha }}
+          # 上传前端构建目录
+          path: dist
+          # 找不到 dist 时让步骤失败，避免误以为上传成功
+          if-no-files-found: error
+          # Artifact 保存 7 天
+          retention-days: 7
