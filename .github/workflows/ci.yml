@@ -31,6 +31,9 @@ jobs:
       - name: Run frontend tests
         run: npm test
 
+      - name: Test staging deployment script
+        run: python3 -m unittest discover -s ops/tests -v
+
       - name: Check types and build frontend
         run: npm run build
 
@@ -48,3 +51,94 @@ jobs:
           if-no-files-found: error
           # Artifact 保存 7 天
           retention-days: 7
+
+  deploy_staging:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # 等待测试和构建成功
+    needs: test
+    # 只在推送到main时部署
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # 配置的测试环境
+    environment: staging
+
+    # 同一时间只运行一个 staging 部署，不中断正在切换版本的任务
+    concurrency:
+      group: deploy-staging
+      cancel-in-progress: false # 已经开始的部署继续做完，不被新任务打断
+
+    env:
+      DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+      DEPLOY_PORT: ${{ vars.DEPLOY_PORT }}
+      DEPLOY_USER: ${{ vars.DEPLOY_USER }}
+
+    steps:
+      # 获取仓库中的部署脚本；前端文件来自下面下载的 Artifact
+      - name: Checkout deployment script
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Download frontend artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: frontend-dist-${{ github.sha }}
+          path: dist
+
+      - name: Configure SSH
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ vars.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          # 检查必填变量
+          : "${DEPLOY_HOST:?Missing DEPLOY_HOST}"
+          : "${DEPLOY_PORT:?Missing DEPLOY_PORT}"
+          : "${DEPLOY_USER:?Missing DEPLOY_USER}"
+          : "${DEPLOY_SSH_KEY:?Missing DEPLOY_SSH_KEY}"
+          : "${DEPLOY_KNOWN_HOSTS:?Missing DEPLOY_KNOWN_HOSTS}"
+
+          # 新文件默认仅当前用户能访问
+          umask 077
+          mkdir -p "$RUNNER_TEMP/staging-ssh"
+          printf '%s\n' "$DEPLOY_SSH_KEY" > "$RUNNER_TEMP/staging-ssh/key"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$RUNNER_TEMP/staging-ssh/known_hosts"
+
+          # staging 是这份 SSH 配置中的连接别名
+          cat > "$RUNNER_TEMP/staging-ssh/config" <<EOF
+          Host staging
+            HostName $DEPLOY_HOST
+            User $DEPLOY_USER
+            Port $DEPLOY_PORT
+            IdentityFile $RUNNER_TEMP/staging-ssh/key
+            UserKnownHostsFile $RUNNER_TEMP/staging-ssh/known_hosts
+            IdentitiesOnly yes
+            BatchMode yes
+            StrictHostKeyChecking yes
+            ConnectTimeout 10
+            ServerAliveInterval 30
+            ServerAliveCountMax 3
+          EOF
+
+      - name: Upload and deploy staging
+        run: |
+          ssh_config="$RUNNER_TEMP/staging-ssh/config"
+          upload_id="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+
+          # 把已经下载好的 dist 打包，便于一次传输
+          tar -czf "$RUNNER_TEMP/frontend.tar.gz" -C dist .
+          ssh -F "$ssh_config" staging "mkdir -p incoming/$upload_id"
+          scp -F "$ssh_config" \
+            "$RUNNER_TEMP/frontend.tar.gz" \
+            ops/deploy-staging.py \
+            "staging:incoming/$upload_id/"
+
+          # SSH 会将远程脚本的退出状态传回来：验证失败，Job 就失败
+          # trap 在远程命令结束时清理本次上传的临时文件
+          ssh -F "$ssh_config" staging \
+            "trap 'rm -rf -- incoming/$upload_id' EXIT; python3 incoming/$upload_id/deploy-staging.py incoming/$upload_id/frontend.tar.gz '$GITHUB_SHA'"
+
+      - name: Clean up local SSH files
+        if: always()
+        run: |
+          rm -rf -- "$RUNNER_TEMP/staging-ssh"
+          rm -f -- "$RUNNER_TEMP/frontend.tar.gz"
