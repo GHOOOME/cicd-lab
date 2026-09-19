@@ -142,3 +142,90 @@ jobs:
         run: |
           rm -rf -- "$RUNNER_TEMP/staging-ssh"
           rm -f -- "$RUNNER_TEMP/frontend.tar.gz"
+
+  deploy_production:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # staging 成功后，才轮到 production
+    needs: deploy_staging
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # 关联 production Environment
+    environment: production
+
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+
+    env:
+      DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+      DEPLOY_PORT: ${{ vars.DEPLOY_PORT }}
+      DEPLOY_USER: ${{ vars.DEPLOY_USER }}
+
+    steps:
+      - name: Checkout deployment script
+        uses: actions/checkout@v7
+        with:
+          # 不保留 checkout 使用的 Git 登录凭据
+          persist-credentials: false
+
+      - name: Download frontend artifact
+        uses: actions/download-artifact@v7
+        with:
+          # 与 staging 使用同一次 Workflow 的同名产物，不重新构建
+          name: frontend-dist-${{ github.sha }}
+          path: dist
+
+      - name: Configure SSH
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ vars.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          : "${DEPLOY_HOST:?Missing DEPLOY_HOST}"
+          : "${DEPLOY_PORT:?Missing DEPLOY_PORT}"
+          : "${DEPLOY_USER:?Missing DEPLOY_USER}"
+          : "${DEPLOY_SSH_KEY:?Missing DEPLOY_SSH_KEY}"
+          : "${DEPLOY_KNOWN_HOSTS:?Missing DEPLOY_KNOWN_HOSTS}"
+
+          umask 077
+          mkdir -p "$RUNNER_TEMP/production-ssh"
+          printf '%s\n' "$DEPLOY_SSH_KEY" > "$RUNNER_TEMP/production-ssh/key"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$RUNNER_TEMP/production-ssh/known_hosts"
+
+          cat > "$RUNNER_TEMP/production-ssh/config" <<EOF
+          Host production
+            HostName $DEPLOY_HOST
+            User $DEPLOY_USER
+            Port $DEPLOY_PORT
+            IdentityFile $RUNNER_TEMP/production-ssh/key
+            UserKnownHostsFile $RUNNER_TEMP/production-ssh/known_hosts
+            IdentitiesOnly yes
+            BatchMode yes
+            StrictHostKeyChecking yes
+            ConnectTimeout 10
+            ServerAliveInterval 30
+            ServerAliveCountMax 3
+          EOF
+
+      - name: Upload and deploy production
+        run: |
+          ssh_config="$RUNNER_TEMP/production-ssh/config"
+          upload_id="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+
+          tar -czf "$RUNNER_TEMP/frontend.tar.gz" -C dist .
+          ssh -F "$ssh_config" production "mkdir -p incoming/$upload_id"
+          # 两个 Python 文件要一起上传，production 入口会加载共享逻辑
+          scp -F "$ssh_config" \
+            "$RUNNER_TEMP/frontend.tar.gz" \
+            ops/deploy-staging.py \
+            ops/deploy-production.py \
+            "production:incoming/$upload_id/"
+
+          ssh -F "$ssh_config" production \
+            "trap 'rm -rf -- incoming/$upload_id' EXIT; python3 incoming/$upload_id/deploy-production.py incoming/$upload_id/frontend.tar.gz '$GITHUB_SHA'"
+
+      - name: Clean up local SSH files
+        # 即使前面失败，也尝试执行这个步骤
+        if: always()
+        run: |
+          rm -rf -- "$RUNNER_TEMP/production-ssh"
+          rm -f -- "$RUNNER_TEMP/frontend.tar.gz"

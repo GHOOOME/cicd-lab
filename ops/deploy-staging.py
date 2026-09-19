@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""部署已构建的前端到 staging；失败时恢复之前的版本和环境信息。"""
+"""部署已构建的前端；此命令默认部署 staging，生产入口复用这里的逻辑。"""
 
 import fcntl
 import hashlib
@@ -124,16 +124,18 @@ def verify_http(base_url, metadata, environment):
             return
         except (OSError, ValueError) as error:
             if attempt == 4:
-                raise RuntimeError(f"Staging verification failed: {error}") from error
+                raise RuntimeError(f"{environment['environment'].capitalize()} verification failed: {error}") from error
             time.sleep(1)
 
 
-def deploy(archive, expected_commit, root=STAGING_ROOT, base_url=STAGING_URL):
+def deploy(archive, expected_commit, root=STAGING_ROOT, base_url=STAGING_URL, *, environment="staging"):
+    if environment not in ("staging", "production"):
+        raise ValueError("Environment must be staging or production")
     if not re.fullmatch(r"[0-9a-fA-F]{40}", expected_commit):
         raise ValueError("Expected commit must be a full 40-character SHA")
     root = Path(root)
     if root.is_symlink() or not root.is_dir():
-        raise ValueError("Staging directory must already exist and cannot be a symlink")
+        raise ValueError(f"{environment.capitalize()} directory must already exist and cannot be a symlink")
     descriptor = os.open(root / ".deploy.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     with os.fdopen(descriptor, "a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
@@ -159,11 +161,11 @@ def deploy(archive, expected_commit, root=STAGING_ROOT, base_url=STAGING_URL):
             raise ValueError("environment.json must be a regular file or absent")
         previous = os.readlink(current) if current.is_symlink() else None
         old_environment = env_file.read_bytes() if env_file.exists() else None
-        environment = {"environment": "staging", "deployedAt": datetime.now(timezone.utc).isoformat()}
+        runtime_environment = {"environment": environment, "deployedAt": datetime.now(timezone.utc).isoformat()}
         try:
-            replace_bytes(env_file, (json.dumps(environment) + "\n").encode())
+            replace_bytes(env_file, (json.dumps(runtime_environment) + "\n").encode())
             replace_link(current, release)
-            verify_http(base_url, metadata, environment)
+            verify_http(base_url, metadata, runtime_environment)
         except BaseException:
             # 恢复链接字符串即可；不要跟随或修改以前共享的版本目录。
             errors = []
@@ -174,9 +176,9 @@ def deploy(archive, expected_commit, root=STAGING_ROOT, base_url=STAGING_URL):
                     errors.append(str(error))
             if errors:
                 raise RuntimeError("Deployment failed; rollback needs attention: " + "; ".join(errors))
-            print("Staging verification failed; previous release and environment restored.", file=sys.stderr)
+            print(f"{environment.capitalize()} verification failed; previous release and environment restored.", file=sys.stderr)
             raise
-        print(f"Deployed staging: {metadata['version']} ({metadata['buildId']}), commit={metadata['commit']}")
+        print(f"Deployed {environment}: {metadata['version']} ({metadata['buildId']}), commit={metadata['commit']}")
         return metadata
 
 
