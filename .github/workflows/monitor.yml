@@ -1,0 +1,100 @@
+name: Service monitor
+
+on:
+  # 自动检查：每小时的第 7、22、37、52 分钟，默认按 UTC 计算
+  schedule:
+    - cron: '7,22,37,52 * * * *'
+  # 手动检查，也可选择模拟一次失败以验证邮件通知
+  workflow_dispatch:
+    inputs:
+      simulate_failure:
+        description: '模拟监控失败以测试邮件（不修改服务）'
+        type: boolean
+        required: false
+        default: false
+
+# 不读写 GitHub 仓库/API；SSH 使用另外配置的密钥
+permissions: {}
+
+jobs:
+  check_services:
+    # 手动运行也请选择 main，和 staging 的分支限制保持一致
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    environment:
+      # 复用 staging 的 SSH 配置；因为我的staging和production在同一服务器，通过不同端口区分，后面会讲如果在不同服务器的做法
+      name: staging
+      # 读取环境配置，但不把每次监控记成一次部署
+      deployment: false
+
+    env:
+      DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+      DEPLOY_PORT: ${{ vars.DEPLOY_PORT }}
+      DEPLOY_USER: ${{ vars.DEPLOY_USER }}
+
+    steps:
+      - name: Configure SSH
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ vars.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          : "${DEPLOY_HOST:?Missing DEPLOY_HOST}"
+          : "${DEPLOY_PORT:?Missing DEPLOY_PORT}"
+          : "${DEPLOY_USER:?Missing DEPLOY_USER}"
+          : "${DEPLOY_SSH_KEY:?Missing DEPLOY_SSH_KEY}"
+          : "${DEPLOY_KNOWN_HOSTS:?Missing DEPLOY_KNOWN_HOSTS}"
+
+          umask 077
+          mkdir -p "$RUNNER_TEMP/monitor-ssh"
+          printf '%s\n' "$DEPLOY_SSH_KEY" > "$RUNNER_TEMP/monitor-ssh/key"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$RUNNER_TEMP/monitor-ssh/known_hosts"
+
+          cat > "$RUNNER_TEMP/monitor-ssh/config" <<EOF
+          Host monitor
+            HostName $DEPLOY_HOST
+            User $DEPLOY_USER
+            Port $DEPLOY_PORT
+            IdentityFile $RUNNER_TEMP/monitor-ssh/key
+            UserKnownHostsFile $RUNNER_TEMP/monitor-ssh/known_hosts
+            IdentitiesOnly yes
+            BatchMode yes
+            StrictHostKeyChecking yes
+            ConnectTimeout 10
+            ServerAliveInterval 15
+            ServerAliveCountMax 2
+          EOF
+
+      - name: Check staging and production
+        run: |
+          # REMOTE 中的命令在服务器执行，所以 127.0.0.1 指服务器自身
+          ssh -F "$RUNNER_TEMP/monitor-ssh/config" monitor 'bash -se' <<'REMOTE'
+          status=0
+          for target in staging:18082 production:18083; do
+            environment="${target%%:*}"
+            port="${target##*:}"
+            for path in /health /; do
+              if code=$(curl --noproxy '*' --fail --silent --show-error \
+                --connect-timeout 3 --max-time 10 \
+                --output /dev/null --write-out '%{http_code}' \
+                "http://127.0.0.1:$port$path") && [ "$code" = 200 ]; then
+                echo "OK: $environment $path HTTP $code"
+              else
+                echo "FAILED: $environment $path HTTP ${code:-unknown}"
+                status=1
+              fi
+            done
+          done
+          # 即使其中一个请求失败，也检查完其他请求再返回整体结果
+          exit "$status"
+          REMOTE
+
+      - name: Simulate failure for email test
+        if: ${{ inputs.simulate_failure }}
+        run: |
+          echo "::error::这是人工选择的通知演练；没有修改或停止服务。"
+          exit 1
+
+      - name: Clean up SSH files
+        if: always()
+        run: rm -rf -- "$RUNNER_TEMP/monitor-ssh"
